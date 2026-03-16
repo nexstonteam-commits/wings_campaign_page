@@ -1603,7 +1603,7 @@ function AdminPage({
         </div>
         <div className="toolbar-actions">
           <button className="btn-export" type="button" onClick={handleExport}>📥 Export as Excel</button>
-          <button className="btn-clear" type="button" onClick={clearLeads}>🗑️ Clear All Data</button>
+          {/* <button className="btn-clear" type="button" onClick={clearLeads}>🗑️ Clear All Data</button> */}
         </div>
       </section>
 
