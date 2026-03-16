@@ -1,23 +1,23 @@
 {
-"name": "wingscampus",
-"private": true,
-"version": "0.0.0",
-"type": "module",
-"scripts": {
-"dev": "vite",
-"build": "vite build",
-"preview": "vite preview"
-},
-"dependencies": {
-"mongodb": "^6.5.0",
-"react": "^19.1.1",
-"react-dom": "^19.1.1",
-"react-router-dom": "^7.9.1"
-},
-"devDependencies": {
-"@types/react": "^19.1.10",
-"@types/react-dom": "^19.1.7",
-"typescript": "~5.9.3",
-"vite": "^8.0.0"
-}
+  "name": "wingscampus",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "mongodb": "^6.5.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "react-router-dom": "^7.9.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "typescript": "~5.9.3",
+    "vite": "^8.0.0"
+  }
 }
