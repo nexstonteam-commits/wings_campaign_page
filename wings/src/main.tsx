@@ -124,6 +124,7 @@ const MONGO_CONFIG_COLLECTION = (import.meta.env.VITE_MONGO_CONFIG_COLLECTION ??
 const MONGO_ENABLED = Boolean(MONGO_DATA_API_URL && MONGO_DATA_API_KEY && MONGO_DATA_SOURCE && MONGO_DB)
 const MONGO_CONFIG_ENABLED = Boolean(MONGO_ENABLED && MONGO_CONFIG_COLLECTION)
 const SITE_CONFIG_DOC_ID = 'site-config'
+const LOCAL_FALLBACK_ENABLED = import.meta.env.DEV
 
 const DEFAULT_SITE_CONFIG: SiteConfig = {
   meta: {
@@ -644,7 +645,7 @@ function exportLeadsAsExcel(records: LeadRecord[]) {
 }
 
 function App() {
-  const [leads, setLeads] = useState<LeadRecord[]>([])
+  const [leads, setLeads] = useState<LeadRecord[]>(() => (LOCAL_FALLBACK_ENABLED ? loadLeads() : []))
   const [booting, setBooting] = useState(true)
   const [isAdminAuthed, setIsAdminAuthed] = useState<boolean>(() => loadAdminAuth())
   const [isCpAuthed, setIsCpAuthed] = useState<boolean>(() => loadCpAuth())
@@ -652,7 +653,9 @@ function App() {
   const [remoteConfigReady, setRemoteConfigReady] = useState(!MONGO_CONFIG_ENABLED)
 
   useEffect(() => {
-    window.localStorage.removeItem(STORAGE_KEY)
+    if (!LOCAL_FALLBACK_ENABLED) {
+      window.localStorage.removeItem(STORAGE_KEY)
+    }
   }, [])
   useEffect(() => { saveAdminAuth(isAdminAuthed) }, [isAdminAuthed])
   useEffect(() => { saveCpAuth(isCpAuthed) }, [isCpAuthed])
@@ -690,6 +693,10 @@ function App() {
     if (!isAdminAuthed) return
     let active = true
     const load = async () => {
+      if (!MONGO_ENABLED && LOCAL_FALLBACK_ENABLED) {
+        if (active) setLeads(loadLeads())
+        return
+      }
       try {
         const records = await fetchLeadsServerless()
         if (!active) return
@@ -744,11 +751,24 @@ function App() {
     } catch (error) {
       if (MONGO_ENABLED) {
         await insertLeadRemote(record)
+      } else if (LOCAL_FALLBACK_ENABLED) {
+        setLeads((current) => {
+          const next = [record, ...current]
+          saveLeads(next)
+          return next
+        })
+        return
       } else {
         throw error
       }
     }
-    setLeads((current) => [record, ...current])
+    setLeads((current) => {
+      const next = [record, ...current]
+      if (LOCAL_FALLBACK_ENABLED) {
+        saveLeads(next)
+      }
+      return next
+    })
   }
 
   const handleAdminLogin = (userId: string, password: string) => {
@@ -1023,7 +1043,6 @@ function StudentsPage({ onSubmitLead, config }: { onSubmitLead: (form: LeadForm)
       && form.school.trim()
       && form.standard.trim()
       && form.place.trim()
-      && form.consent
   )
 
   const scrollToForm = () => {
@@ -1169,7 +1188,7 @@ function StudentsPage({ onSubmitLead, config }: { onSubmitLead: (form: LeadForm)
             </div>
 
             <div className="consent-row">
-              <input id="consent" name="consent" type="checkbox" checked={form.consent} onChange={handleChange} disabled={submitting || registrationClosed} required />
+              <input id="consent" name="consent" type="checkbox" checked={form.consent} onChange={handleChange} disabled={submitting || registrationClosed} />
               <span>
                 {config.form.consentText}
               </span>
