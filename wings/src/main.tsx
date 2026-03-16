@@ -27,6 +27,18 @@ type LeadRecord = LeadForm & {
   submittedAt: string
 }
 
+type LeadApiPayload = {
+  id: string
+  submittedAt: string
+  studentName: string
+  guardianName: string
+  phone: string
+  school: string
+  standard: string
+  place: string
+  consent: boolean
+}
+
 type SiteConfig = {
   meta: {
     title: string
@@ -51,6 +63,7 @@ type SiteConfig = {
     english: string
   }
   campaignTitle: string
+  registrationCloseDate: string
   form: {
     urgencyText: string
     eyebrow: string
@@ -97,10 +110,20 @@ const SITE_CONFIG_KEY = 'wingscampus-site-config'
 const CP_AUTH_KEY = 'wingscampus-cp-auth'
 const GIVEAWAY_LIMIT = 100
 const FAKE_COUNTER_MAX = 86
-const ADMIN_USER_ID = 'NIDHIN'
-const ADMIN_PASSWORD = 'WINGS@2026'
-const CP_USER_ID = 'ASWIN'
-const CP_PASSWORD = 'WINGS@2026'
+const ADMIN_USER_ID = (import.meta.env.VITE_ADMIN_USER_ID ?? '').trim()
+const ADMIN_PASSWORD = (import.meta.env.VITE_ADMIN_PASSWORD ?? '').trim()
+const CP_USER_ID = (import.meta.env.VITE_CP_USER_ID ?? '').trim()
+const CP_PASSWORD = (import.meta.env.VITE_CP_PASSWORD ?? '').trim()
+
+const MONGO_DATA_API_URL = (import.meta.env.VITE_MONGO_DATA_API_URL ?? '').trim()
+const MONGO_DATA_API_KEY = (import.meta.env.VITE_MONGO_DATA_API_KEY ?? '').trim()
+const MONGO_DATA_SOURCE = (import.meta.env.VITE_MONGO_DATA_SOURCE ?? '').trim()
+const MONGO_DB = (import.meta.env.VITE_MONGO_DB ?? '').trim()
+const MONGO_LEADS_COLLECTION = (import.meta.env.VITE_MONGO_LEADS_COLLECTION ?? 'leads').trim()
+const MONGO_CONFIG_COLLECTION = (import.meta.env.VITE_MONGO_CONFIG_COLLECTION ?? 'siteConfig').trim()
+const MONGO_ENABLED = Boolean(MONGO_DATA_API_URL && MONGO_DATA_API_KEY && MONGO_DATA_SOURCE && MONGO_DB)
+const MONGO_CONFIG_ENABLED = Boolean(MONGO_ENABLED && MONGO_CONFIG_COLLECTION)
+const SITE_CONFIG_DOC_ID = 'site-config'
 
 const DEFAULT_SITE_CONFIG: SiteConfig = {
   meta: {
@@ -126,6 +149,7 @@ const DEFAULT_SITE_CONFIG: SiteConfig = {
     english: 'Register among the first 100 students and enter the giveaway.',
   },
   campaignTitle: 'Our Campaigns',
+  registrationCloseDate: '',
   form: {
     urgencyText: 'Only {spotsLeft} spots left for the Tablet Giveaway',
     eyebrow: 'Registration / രജിസ്ട്രേഷൻ',
@@ -196,6 +220,150 @@ function saveLeads(records: LeadRecord[]) {
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(records))
 }
 
+async function mongoRequest<T>(action: string, body: Record<string, unknown>): Promise<T> {
+  if (!MONGO_ENABLED) {
+    throw new Error('MONGO_NOT_CONFIGURED')
+  }
+  const baseUrl = MONGO_DATA_API_URL.replace(/\/$/, '')
+  const res = await fetch(`${baseUrl}/${action}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'api-key': MONGO_DATA_API_KEY,
+    },
+    body: JSON.stringify(body),
+  })
+  const text = await res.text()
+  let payload: unknown = {}
+  if (text) {
+    try {
+      payload = JSON.parse(text)
+    } catch {
+      payload = { error: text }
+    }
+  }
+  if (!res.ok) {
+    const message = typeof (payload as { error?: string })?.error === 'string' ? (payload as { error?: string }).error : res.statusText
+    throw new Error(message || 'MONGO_REQUEST_FAILED')
+  }
+  if (typeof (payload as { error?: string })?.error === 'string') {
+    throw new Error((payload as { error?: string }).error as string)
+  }
+  return payload as T
+}
+
+async function fetchLeadsRemote(): Promise<LeadRecord[]> {
+  const result = await mongoRequest<{ documents?: Array<LeadRecord & { _id?: unknown }> }>('find', {
+    dataSource: MONGO_DATA_SOURCE,
+    database: MONGO_DB,
+    collection: MONGO_LEADS_COLLECTION,
+    filter: {},
+    sort: { submittedAt: -1 },
+  })
+  return (result.documents ?? []).map((doc) => {
+    const { _id, ...rest } = doc
+    return rest
+  })
+}
+
+async function leadExistsRemote(phone: string): Promise<boolean> {
+  const result = await mongoRequest<{ document?: LeadRecord }>('findOne', {
+    dataSource: MONGO_DATA_SOURCE,
+    database: MONGO_DB,
+    collection: MONGO_LEADS_COLLECTION,
+    filter: { phone },
+  })
+  return Boolean(result.document)
+}
+
+async function insertLeadRemote(record: LeadRecord): Promise<void> {
+  await mongoRequest('insertOne', {
+    dataSource: MONGO_DATA_SOURCE,
+    database: MONGO_DB,
+    collection: MONGO_LEADS_COLLECTION,
+    document: record,
+  })
+}
+
+function buildLeadApiPayload(record: LeadRecord): LeadApiPayload {
+  return {
+    id: record.id,
+    submittedAt: record.submittedAt,
+    studentName: record.studentName,
+    guardianName: record.guardianName,
+    phone: record.phone,
+    school: record.school,
+    standard: record.standard,
+    place: record.place,
+    consent: record.consent,
+  }
+}
+
+async function insertLeadServerless(payload: LeadApiPayload): Promise<void> {
+  const res = await fetch('/api/leads', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+
+  const text = await res.text()
+  let responsePayload: unknown = {}
+  if (text) {
+    try {
+      responsePayload = JSON.parse(text)
+    } catch {
+      responsePayload = { error: text }
+    }
+  }
+
+  if (!res.ok) {
+    const message = typeof (responsePayload as { error?: string })?.error === 'string'
+      ? (responsePayload as { error?: string }).error
+      : res.statusText
+    if (message === 'DUPLICATE_PHONE') {
+      throw new DuplicatePhoneError()
+    }
+    throw new Error(message || 'LEAD_INSERT_FAILED')
+  }
+
+  if ((responsePayload as { success?: boolean })?.success !== true) {
+    throw new Error('LEAD_INSERT_FAILED')
+  }
+}
+
+async function clearLeadsRemote(): Promise<void> {
+  await mongoRequest('deleteMany', {
+    dataSource: MONGO_DATA_SOURCE,
+    database: MONGO_DB,
+    collection: MONGO_LEADS_COLLECTION,
+    filter: {},
+  })
+}
+
+async function fetchSiteConfigRemote(): Promise<SiteConfig | null> {
+  if (!MONGO_CONFIG_ENABLED) return null
+  const result = await mongoRequest<{ document?: Partial<SiteConfig> }>('findOne', {
+    dataSource: MONGO_DATA_SOURCE,
+    database: MONGO_DB,
+    collection: MONGO_CONFIG_COLLECTION,
+    filter: { _id: SITE_CONFIG_DOC_ID },
+  })
+  if (!result.document) return null
+  return buildSiteConfig(result.document)
+}
+
+async function saveSiteConfigRemote(config: SiteConfig): Promise<void> {
+  if (!MONGO_CONFIG_ENABLED) return
+  await mongoRequest('updateOne', {
+    dataSource: MONGO_DATA_SOURCE,
+    database: MONGO_DB,
+    collection: MONGO_CONFIG_COLLECTION,
+    filter: { _id: SITE_CONFIG_DOC_ID },
+    update: { $set: { ...config, updatedAt: new Date().toISOString() } },
+    upsert: true,
+  })
+}
+
 function loadFakeCounter(): number {
   const saved = window.localStorage.getItem(FAKE_COUNTER_KEY)
   if (!saved) return 0
@@ -245,101 +413,106 @@ function sanitizeClassText(input: string): string {
     .replace(/8th\s*standard/gi, '7th Standard')
 }
 
+function buildSiteConfig(parsed: Partial<SiteConfig> = {}): SiteConfig {
+  return {
+    meta: {
+      title: parsed.meta?.title ?? DEFAULT_SITE_CONFIG.meta.title,
+      description: sanitizeClassText(parsed.meta?.description ?? DEFAULT_SITE_CONFIG.meta.description),
+      keywords: parsed.meta?.keywords ?? DEFAULT_SITE_CONFIG.meta.keywords,
+      ogTitle: parsed.meta?.ogTitle ?? DEFAULT_SITE_CONFIG.meta.ogTitle,
+      ogDescription: sanitizeClassText(parsed.meta?.ogDescription ?? DEFAULT_SITE_CONFIG.meta.ogDescription),
+      ogImage: parsed.meta?.ogImage ?? DEFAULT_SITE_CONFIG.meta.ogImage,
+    },
+    hero: {
+      badge: parsed.hero?.badge ?? DEFAULT_SITE_CONFIG.hero.badge,
+      titleMain: parsed.hero?.titleMain ?? DEFAULT_SITE_CONFIG.hero.titleMain,
+      titleHighlight: parsed.hero?.titleHighlight ?? DEFAULT_SITE_CONFIG.hero.titleHighlight,
+      intro1: sanitizeClassText(parsed.hero?.intro1 ?? DEFAULT_SITE_CONFIG.hero.intro1).replace(/Classes 6 and 7/gi, 'Classes 7 and 8'),
+      intro2: parsed.hero?.intro2 ?? DEFAULT_SITE_CONFIG.hero.intro2,
+      ctaText: parsed.hero?.ctaText ?? DEFAULT_SITE_CONFIG.hero.ctaText,
+    },
+    features: [
+      sanitizeClassText(parsed.features?.[0] ?? DEFAULT_SITE_CONFIG.features[0]),
+      sanitizeClassText(parsed.features?.[1] ?? DEFAULT_SITE_CONFIG.features[1]),
+      sanitizeClassText(parsed.features?.[2] ?? DEFAULT_SITE_CONFIG.features[2]).replace(/Kodungallur Campus/gi, 'STATE & CBSE'),
+      sanitizeClassText(parsed.features?.[3] ?? DEFAULT_SITE_CONFIG.features[3]).replace(/Class 6\s*&\s*7/gi, 'Class 7 & 8'),
+    ],
+    giveaway: {
+      title: parsed.giveaway?.title ?? DEFAULT_SITE_CONFIG.giveaway.title,
+      text: parsed.giveaway?.text ?? DEFAULT_SITE_CONFIG.giveaway.text,
+      english: parsed.giveaway?.english ?? DEFAULT_SITE_CONFIG.giveaway.english,
+    },
+    campaignTitle: parsed.campaignTitle ?? DEFAULT_SITE_CONFIG.campaignTitle,
+    registrationCloseDate: normalizedCloseDate || DEFAULT_SITE_CONFIG.registrationCloseDate,
+    form: {
+      urgencyText: parsed.form?.urgencyText ?? DEFAULT_SITE_CONFIG.form.urgencyText,
+      eyebrow: parsed.form?.eyebrow ?? DEFAULT_SITE_CONFIG.form.eyebrow,
+      title: parsed.form?.title ?? DEFAULT_SITE_CONFIG.form.title,
+      subtitle: decodeEntities(parsed.form?.subtitle ?? DEFAULT_SITE_CONFIG.form.subtitle),
+      studentLabel: parsed.form?.studentLabel ?? DEFAULT_SITE_CONFIG.form.studentLabel,
+      studentPlaceholder: parsed.form?.studentPlaceholder ?? DEFAULT_SITE_CONFIG.form.studentPlaceholder,
+      guardianLabel: parsed.form?.guardianLabel ?? DEFAULT_SITE_CONFIG.form.guardianLabel,
+      guardianPlaceholder: parsed.form?.guardianPlaceholder ?? DEFAULT_SITE_CONFIG.form.guardianPlaceholder,
+      phoneLabel: parsed.form?.phoneLabel ?? DEFAULT_SITE_CONFIG.form.phoneLabel,
+      phonePlaceholder: parsed.form?.phonePlaceholder ?? DEFAULT_SITE_CONFIG.form.phonePlaceholder,
+      standardLabel: parsed.form?.standardLabel ?? DEFAULT_SITE_CONFIG.form.standardLabel,
+      standardPlaceholder: parsed.form?.standardPlaceholder ?? DEFAULT_SITE_CONFIG.form.standardPlaceholder,
+      standardOptions: [
+        sanitizeClassText(parsed.form?.standardOptions?.[0] ?? DEFAULT_SITE_CONFIG.form.standardOptions[0]),
+        sanitizeClassText(parsed.form?.standardOptions?.[1] ?? DEFAULT_SITE_CONFIG.form.standardOptions[1]),
+      ],
+      schoolLabel: parsed.form?.schoolLabel ?? DEFAULT_SITE_CONFIG.form.schoolLabel,
+      schoolPlaceholder: parsed.form?.schoolPlaceholder ?? DEFAULT_SITE_CONFIG.form.schoolPlaceholder,
+      placeLabel: parsed.form?.placeLabel ?? DEFAULT_SITE_CONFIG.form.placeLabel,
+      placePlaceholder: parsed.form?.placePlaceholder ?? DEFAULT_SITE_CONFIG.form.placePlaceholder,
+      consentText: parsed.form?.consentText ?? DEFAULT_SITE_CONFIG.form.consentText,
+      submitText: parsed.form?.submitText ?? DEFAULT_SITE_CONFIG.form.submitText,
+      submittingText: parsed.form?.submittingText ?? DEFAULT_SITE_CONFIG.form.submittingText,
+    },
+    infoCards: [
+      {
+        icon: parsed.infoCards?.[0]?.icon ?? DEFAULT_SITE_CONFIG.infoCards[0].icon,
+        title: parsed.infoCards?.[0]?.title ?? DEFAULT_SITE_CONFIG.infoCards[0].title,
+        text: parsed.infoCards?.[0]?.text ?? DEFAULT_SITE_CONFIG.infoCards[0].text,
+      },
+      {
+        icon: parsed.infoCards?.[1]?.icon ?? DEFAULT_SITE_CONFIG.infoCards[1].icon,
+        title: parsed.infoCards?.[1]?.title ?? DEFAULT_SITE_CONFIG.infoCards[1].title,
+        text: parsed.infoCards?.[1]?.text ?? DEFAULT_SITE_CONFIG.infoCards[1].text,
+      },
+      {
+        icon: parsed.infoCards?.[2]?.icon ?? DEFAULT_SITE_CONFIG.infoCards[2].icon,
+        title: parsed.infoCards?.[2]?.title ?? DEFAULT_SITE_CONFIG.infoCards[2].title,
+        text: parsed.infoCards?.[2]?.text ?? DEFAULT_SITE_CONFIG.infoCards[2].text,
+      },
+      {
+        icon: parsed.infoCards?.[3]?.icon ?? DEFAULT_SITE_CONFIG.infoCards[3].icon,
+        title: parsed.infoCards?.[3]?.title ?? DEFAULT_SITE_CONFIG.infoCards[3].title,
+        text: parsed.infoCards?.[3]?.text ?? DEFAULT_SITE_CONFIG.infoCards[3].text,
+      },
+    ],
+    footerText: parsed.footerText ?? DEFAULT_SITE_CONFIG.footerText,
+    images: {
+      logo: parsed.images?.logo ?? DEFAULT_SITE_CONFIG.images.logo,
+      boy: parsed.images?.boy ?? DEFAULT_SITE_CONFIG.images.boy,
+      offer: parsed.images?.offer ?? DEFAULT_SITE_CONFIG.images.offer,
+      tab: parsed.images?.tab ?? DEFAULT_SITE_CONFIG.images.tab,
+      footer: parsed.images?.footer ?? DEFAULT_SITE_CONFIG.images.footer,
+      ads: [
+        parsed.images?.ads?.[0] ?? DEFAULT_SITE_CONFIG.images.ads[0],
+        parsed.images?.ads?.[1] ?? DEFAULT_SITE_CONFIG.images.ads[1],
+        parsed.images?.ads?.[2] ?? DEFAULT_SITE_CONFIG.images.ads[2],
+      ],
+    },
+  }
+}
+
 function loadSiteConfig(): SiteConfig {
   const saved = window.localStorage.getItem(SITE_CONFIG_KEY)
   if (!saved) return DEFAULT_SITE_CONFIG
   try {
     const parsed = JSON.parse(saved) as Partial<SiteConfig>
-    return {
-      meta: {
-        title: parsed.meta?.title ?? DEFAULT_SITE_CONFIG.meta.title,
-        description: sanitizeClassText(parsed.meta?.description ?? DEFAULT_SITE_CONFIG.meta.description),
-        keywords: parsed.meta?.keywords ?? DEFAULT_SITE_CONFIG.meta.keywords,
-        ogTitle: parsed.meta?.ogTitle ?? DEFAULT_SITE_CONFIG.meta.ogTitle,
-        ogDescription: sanitizeClassText(parsed.meta?.ogDescription ?? DEFAULT_SITE_CONFIG.meta.ogDescription),
-        ogImage: parsed.meta?.ogImage ?? DEFAULT_SITE_CONFIG.meta.ogImage,
-      },
-      hero: {
-        badge: parsed.hero?.badge ?? DEFAULT_SITE_CONFIG.hero.badge,
-        titleMain: parsed.hero?.titleMain ?? DEFAULT_SITE_CONFIG.hero.titleMain,
-        titleHighlight: parsed.hero?.titleHighlight ?? DEFAULT_SITE_CONFIG.hero.titleHighlight,
-        intro1: sanitizeClassText(parsed.hero?.intro1 ?? DEFAULT_SITE_CONFIG.hero.intro1).replace(/Classes 6 and 7/gi, 'Classes 7 and 8'),
-        intro2: parsed.hero?.intro2 ?? DEFAULT_SITE_CONFIG.hero.intro2,
-        ctaText: parsed.hero?.ctaText ?? DEFAULT_SITE_CONFIG.hero.ctaText,
-      },
-      features: [
-        sanitizeClassText(parsed.features?.[0] ?? DEFAULT_SITE_CONFIG.features[0]),
-        sanitizeClassText(parsed.features?.[1] ?? DEFAULT_SITE_CONFIG.features[1]),
-        sanitizeClassText(parsed.features?.[2] ?? DEFAULT_SITE_CONFIG.features[2]).replace(/Kodungallur Campus/gi, 'STATE & CBSE'),
-        sanitizeClassText(parsed.features?.[3] ?? DEFAULT_SITE_CONFIG.features[3]).replace(/Class 6\s*&\s*7/gi, 'Class 7 & 8'),
-      ],
-      giveaway: {
-        title: parsed.giveaway?.title ?? DEFAULT_SITE_CONFIG.giveaway.title,
-        text: parsed.giveaway?.text ?? DEFAULT_SITE_CONFIG.giveaway.text,
-        english: parsed.giveaway?.english ?? DEFAULT_SITE_CONFIG.giveaway.english,
-      },
-      campaignTitle: parsed.campaignTitle ?? DEFAULT_SITE_CONFIG.campaignTitle,
-      form: {
-        urgencyText: parsed.form?.urgencyText ?? DEFAULT_SITE_CONFIG.form.urgencyText,
-        eyebrow: parsed.form?.eyebrow ?? DEFAULT_SITE_CONFIG.form.eyebrow,
-        title: parsed.form?.title ?? DEFAULT_SITE_CONFIG.form.title,
-        subtitle: decodeEntities(parsed.form?.subtitle ?? DEFAULT_SITE_CONFIG.form.subtitle),
-        studentLabel: parsed.form?.studentLabel ?? DEFAULT_SITE_CONFIG.form.studentLabel,
-        studentPlaceholder: parsed.form?.studentPlaceholder ?? DEFAULT_SITE_CONFIG.form.studentPlaceholder,
-        guardianLabel: parsed.form?.guardianLabel ?? DEFAULT_SITE_CONFIG.form.guardianLabel,
-        guardianPlaceholder: parsed.form?.guardianPlaceholder ?? DEFAULT_SITE_CONFIG.form.guardianPlaceholder,
-        phoneLabel: parsed.form?.phoneLabel ?? DEFAULT_SITE_CONFIG.form.phoneLabel,
-        phonePlaceholder: parsed.form?.phonePlaceholder ?? DEFAULT_SITE_CONFIG.form.phonePlaceholder,
-        standardLabel: parsed.form?.standardLabel ?? DEFAULT_SITE_CONFIG.form.standardLabel,
-        standardPlaceholder: parsed.form?.standardPlaceholder ?? DEFAULT_SITE_CONFIG.form.standardPlaceholder,
-        standardOptions: [
-          sanitizeClassText(parsed.form?.standardOptions?.[0] ?? DEFAULT_SITE_CONFIG.form.standardOptions[0]),
-          sanitizeClassText(parsed.form?.standardOptions?.[1] ?? DEFAULT_SITE_CONFIG.form.standardOptions[1]),
-        ],
-        schoolLabel: parsed.form?.schoolLabel ?? DEFAULT_SITE_CONFIG.form.schoolLabel,
-        schoolPlaceholder: parsed.form?.schoolPlaceholder ?? DEFAULT_SITE_CONFIG.form.schoolPlaceholder,
-        placeLabel: parsed.form?.placeLabel ?? DEFAULT_SITE_CONFIG.form.placeLabel,
-        placePlaceholder: parsed.form?.placePlaceholder ?? DEFAULT_SITE_CONFIG.form.placePlaceholder,
-        consentText: parsed.form?.consentText ?? DEFAULT_SITE_CONFIG.form.consentText,
-        submitText: parsed.form?.submitText ?? DEFAULT_SITE_CONFIG.form.submitText,
-        submittingText: parsed.form?.submittingText ?? DEFAULT_SITE_CONFIG.form.submittingText,
-      },
-      infoCards: [
-        {
-          icon: parsed.infoCards?.[0]?.icon ?? DEFAULT_SITE_CONFIG.infoCards[0].icon,
-          title: parsed.infoCards?.[0]?.title ?? DEFAULT_SITE_CONFIG.infoCards[0].title,
-          text: parsed.infoCards?.[0]?.text ?? DEFAULT_SITE_CONFIG.infoCards[0].text,
-        },
-        {
-          icon: parsed.infoCards?.[1]?.icon ?? DEFAULT_SITE_CONFIG.infoCards[1].icon,
-          title: parsed.infoCards?.[1]?.title ?? DEFAULT_SITE_CONFIG.infoCards[1].title,
-          text: parsed.infoCards?.[1]?.text ?? DEFAULT_SITE_CONFIG.infoCards[1].text,
-        },
-        {
-          icon: parsed.infoCards?.[2]?.icon ?? DEFAULT_SITE_CONFIG.infoCards[2].icon,
-          title: parsed.infoCards?.[2]?.title ?? DEFAULT_SITE_CONFIG.infoCards[2].title,
-          text: parsed.infoCards?.[2]?.text ?? DEFAULT_SITE_CONFIG.infoCards[2].text,
-        },
-        {
-          icon: parsed.infoCards?.[3]?.icon ?? DEFAULT_SITE_CONFIG.infoCards[3].icon,
-          title: parsed.infoCards?.[3]?.title ?? DEFAULT_SITE_CONFIG.infoCards[3].title,
-          text: parsed.infoCards?.[3]?.text ?? DEFAULT_SITE_CONFIG.infoCards[3].text,
-        },
-      ],
-      footerText: parsed.footerText ?? DEFAULT_SITE_CONFIG.footerText,
-      images: {
-        logo: parsed.images?.logo ?? DEFAULT_SITE_CONFIG.images.logo,
-        boy: parsed.images?.boy ?? DEFAULT_SITE_CONFIG.images.boy,
-        offer: parsed.images?.offer ?? DEFAULT_SITE_CONFIG.images.offer,
-        tab: parsed.images?.tab ?? DEFAULT_SITE_CONFIG.images.tab,
-        footer: parsed.images?.footer ?? DEFAULT_SITE_CONFIG.images.footer,
-        ads: [
-          parsed.images?.ads?.[0] ?? DEFAULT_SITE_CONFIG.images.ads[0],
-          parsed.images?.ads?.[1] ?? DEFAULT_SITE_CONFIG.images.ads[1],
-          parsed.images?.ads?.[2] ?? DEFAULT_SITE_CONFIG.images.ads[2],
-        ],
-      },
-    }
+    return buildSiteConfig(parsed)
   } catch {
     window.localStorage.removeItem(SITE_CONFIG_KEY)
     return DEFAULT_SITE_CONFIG
@@ -377,13 +550,39 @@ function normalizePhone(raw: string): string {
   return digits
 }
 
+function formatSubmittedAt(value: string): string {
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return value
+  return parsed.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })
+}
+
+function parseCloseDate(value: string): Date | null {
+  if (!value) return null
+  const parts = value.split('-').map((part) => Number.parseInt(part, 10))
+  if (parts.length !== 3 || parts.some((part) => Number.isNaN(part))) return null
+  const [year, month, day] = parts
+  return new Date(year, month - 1, day)
+}
+
+function normalizeCloseDateValue(value: string): string {
+  const trimmed = value.trim()
+  if (!trimmed || trimmed === '0001-01-01') return ''
+  return trimmed
+}
+
+function isRegistrationClosed(closeDate: string): boolean {
+  const parsed = parseCloseDate(closeDate)
+  if (!parsed) return false
+  return new Date() >= parsed
+}
+
 function exportLeadsAsExcel(records: LeadRecord[]) {
   if (!records.length) return false
 
   const header = ['ID', 'Student Name', 'Guardian Name', 'Phone', 'School', 'Standard', 'Place', 'Consent', 'Submitted At']
   const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
-  const rows = records.map((r) => [r.id, r.studentName, r.guardianName, r.phone, r.school, r.standard, r.place, r.consent ? 'Yes' : 'No', r.submittedAt])
+  const rows = records.map((r) => [r.id, r.studentName, r.guardianName, r.phone, r.school, r.standard, r.place, r.consent ? 'Yes' : 'No', formatSubmittedAt(r.submittedAt)])
 
   let xml = '<?xml version="1.0"?>\n<?mso-application progid="Excel.Sheet"?>\n'
   xml += '<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">\n'
@@ -405,29 +604,84 @@ function exportLeadsAsExcel(records: LeadRecord[]) {
 }
 
 function App() {
-  const [leads, setLeads] = useState<LeadRecord[]>([])
+  const [leads, setLeads] = useState<LeadRecord[]>(() => (MONGO_ENABLED ? [] : loadLeads()))
   const [booting, setBooting] = useState(true)
   const [isAdminAuthed, setIsAdminAuthed] = useState<boolean>(() => loadAdminAuth())
   const [isCpAuthed, setIsCpAuthed] = useState<boolean>(() => loadCpAuth())
   const [siteConfig, setSiteConfig] = useState<SiteConfig>(() => loadSiteConfig())
+  const [remoteConfigReady, setRemoteConfigReady] = useState(!MONGO_CONFIG_ENABLED)
 
-  useEffect(() => { setLeads(loadLeads()) }, [])
-  useEffect(() => { saveLeads(leads) }, [leads])
+  useEffect(() => {
+    if (!MONGO_ENABLED) {
+      saveLeads(leads)
+    }
+  }, [leads])
+  useEffect(() => {
+    if (MONGO_ENABLED) {
+      window.localStorage.removeItem(STORAGE_KEY)
+    }
+  }, [])
   useEffect(() => { saveAdminAuth(isAdminAuthed) }, [isAdminAuthed])
   useEffect(() => { saveCpAuth(isCpAuthed) }, [isCpAuthed])
   useEffect(() => { saveSiteConfig(siteConfig); applyMeta(siteConfig) }, [siteConfig])
+  useEffect(() => {
+    if (!MONGO_CONFIG_ENABLED) return
+    let active = true
+    fetchSiteConfigRemote()
+      .then((remote) => {
+        if (!active) return
+        if (remote) {
+          setSiteConfig(remote)
+        } else {
+          saveSiteConfigRemote(loadSiteConfig()).catch(() => {})
+        }
+        setRemoteConfigReady(true)
+      })
+      .catch(() => {
+        if (active) {
+          setRemoteConfigReady(true)
+        }
+      })
+    return () => {
+      active = false
+    }
+  }, [])
+  useEffect(() => {
+    if (!MONGO_CONFIG_ENABLED || !remoteConfigReady) return
+    const handle = window.setTimeout(() => {
+      saveSiteConfigRemote(siteConfig).catch(() => {})
+    }, 700)
+    return () => window.clearTimeout(handle)
+  }, [siteConfig, remoteConfigReady])
+  useEffect(() => {
+    if (!MONGO_ENABLED || !isAdminAuthed) return
+    let active = true
+    fetchLeadsRemote()
+      .then((records) => {
+        if (!active) return
+        setLeads(records)
+      })
+      .catch(() => {})
+    return () => {
+      active = false
+    }
+  }, [isAdminAuthed])
   useEffect(() => {
     const t = window.setTimeout(() => setBooting(false), 950)
     return () => window.clearTimeout(t)
   }, [])
 
-  const handleLeadSubmit = (form: LeadForm) => {
-    const currentLeads = loadLeads()
+  const handleLeadSubmit = async (form: LeadForm) => {
     const normalizedPhone = normalizePhone(form.phone)
     if (!/^\d{10}$/.test(normalizedPhone)) {
       throw new Error('INVALID_PHONE')
     }
-    if (currentLeads.some((lead) => normalizePhone(lead.phone) === normalizedPhone)) {
+    if (MONGO_ENABLED) {
+      const exists = await leadExistsRemote(normalizedPhone)
+      if (exists) {
+        throw new DuplicatePhoneError()
+      }
+    } else if (leads.some((lead) => normalizePhone(lead.phone) === normalizedPhone)) {
       throw new DuplicatePhoneError()
     }
 
@@ -435,11 +689,18 @@ function App() {
       ...form,
       phone: normalizedPhone,
       id: `WC-${Date.now()}`,
-      submittedAt: new Date().toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }),
+      submittedAt: new Date().toISOString(),
     }
-    const updated = [record, ...currentLeads]
-    saveLeads(updated)
-    setLeads(updated)
+    try {
+      await insertLeadServerless(buildLeadApiPayload(record))
+    } catch (error) {
+      if (MONGO_ENABLED) {
+        await insertLeadRemote(record)
+      } else {
+        throw error
+      }
+    }
+    setLeads((current) => [record, ...current])
   }
 
   const handleAdminLogin = (userId: string, password: string) => {
@@ -492,7 +753,7 @@ function App() {
             path="/admin"
             element={
               isAdminAuthed
-                ? <AdminPage leads={leads} setLeads={setLeads} onLogout={handleAdminLogout} config={siteConfig} />
+                ? <AdminPage leads={leads} setLeads={setLeads} onLogout={handleAdminLogout} config={siteConfig} setConfig={setSiteConfig} />
                 : <Navigate to="/admin-login" replace />
             }
           />
@@ -534,7 +795,7 @@ function AdminLoginPage({
   }
 
   return (
-    <main className="page-shell">
+    <main className="page-shell admin-page">
       <section className="admin-login-shell animate-in">
         <div className="form-card admin-login-card">
           <p className="form-eyebrow">Admin Access</p>
@@ -692,7 +953,7 @@ function GiveawayBanner({ spotsLeft, config }: { spotsLeft: number, config: Site
   )
 }
 
-function StudentsPage({ onSubmitLead, config }: { onSubmitLead: (form: LeadForm) => void, config: SiteConfig }) {
+function StudentsPage({ onSubmitLead, config }: { onSubmitLead: (form: LeadForm) => Promise<void>, config: SiteConfig }) {
   const [form, setForm] = useState<LeadForm>(initialForm)
   const [submitting, setSubmitting] = useState(false)
   const [statusMsg, setStatusMsg] = useState('')
@@ -706,6 +967,16 @@ function StudentsPage({ onSubmitLead, config }: { onSubmitLead: (form: LeadForm)
 
   const spotsLeft = Math.max(1, GIVEAWAY_LIMIT - fakeCounter)
   const urgencyText = config.form.urgencyText.replace('{spotsLeft}', String(spotsLeft))
+  const registrationClosed = isRegistrationClosed(config.registrationCloseDate)
+  const isFormComplete = Boolean(
+    form.studentName.trim()
+      && form.guardianName.trim()
+      && /^\d{10}$/.test(form.phone.trim())
+      && form.school.trim()
+      && form.standard.trim()
+      && form.place.trim()
+      && form.consent
+  )
 
   const scrollToForm = () => {
     formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -722,13 +993,18 @@ function StudentsPage({ onSubmitLead, config }: { onSubmitLead: (form: LeadForm)
     setForm((cur) => ({ ...cur, [name]: type === 'checkbox' ? checked : value }))
   }
 
-  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
+    if (registrationClosed) {
+      setStatusMsg('Registrations are closed.')
+      setStatusType('error')
+      return
+    }
     setSubmitting(true)
     setStatusMsg('')
     setStatusType('')
     try {
-      onSubmitLead(form)
+      await onSubmitLead(form)
       setFakeCounter((cur) => Math.min(FAKE_COUNTER_MAX, cur + 1))
       setForm(initialForm)
       setStatusMsg('Details submitted successfully')
@@ -738,6 +1014,8 @@ function StudentsPage({ onSubmitLead, config }: { onSubmitLead: (form: LeadForm)
         setStatusMsg('This phone number is already registered.')
       } else if (err instanceof Error && err.message === 'INVALID_PHONE') {
         setStatusMsg('Enter a valid 10-digit phone number.')
+      } else if (err instanceof Error && import.meta.env.DEV && err.message) {
+        setStatusMsg(`Submission failed: ${err.message}`)
       } else {
         setStatusMsg('Submission failed. Please try again.')
       }
@@ -748,7 +1026,7 @@ function StudentsPage({ onSubmitLead, config }: { onSubmitLead: (form: LeadForm)
   }
 
   return (
-    <main className="page-shell">
+    <main className="page-shell cp-page">
       <section className="hero-section hero-breakout animate-in" id="hero">
         <SmoothImage src={config.images.offer} fallbackSrc={DEFAULT_SITE_CONFIG.images.offer} alt="Special offer" className="hero-offer" />
         <div className="hero-content">
@@ -804,24 +1082,24 @@ function StudentsPage({ onSubmitLead, config }: { onSubmitLead: (form: LeadForm)
             <div className="form-group">
               <label className="form-label" htmlFor="studentName">{config.form.studentLabel}</label>
               <input id="studentName" className="form-input" name="studentName" value={form.studentName} onChange={handleChange}
-                placeholder={config.form.studentPlaceholder} required />
+                placeholder={config.form.studentPlaceholder} disabled={submitting || registrationClosed} required />
             </div>
 
             <div className="form-group">
               <label className="form-label" htmlFor="guardianName">{config.form.guardianLabel}</label>
               <input id="guardianName" className="form-input" name="guardianName" value={form.guardianName} onChange={handleChange}
-                placeholder={config.form.guardianPlaceholder} required />
+                placeholder={config.form.guardianPlaceholder} disabled={submitting || registrationClosed} required />
             </div>
 
             <div className="form-row">
               <div className="form-group">
                 <label className="form-label" htmlFor="phone">{config.form.phoneLabel}</label>
                 <input id="phone" className="form-input" name="phone" value={form.phone} onChange={handleChange}
-                  placeholder={config.form.phonePlaceholder} inputMode="numeric" pattern="[0-9]{10}" maxLength={10} required />
+                  placeholder={config.form.phonePlaceholder} inputMode="numeric" pattern="[0-9]{10}" maxLength={10} disabled={submitting || registrationClosed} required />
               </div>
               <div className="form-group">
                 <label className="form-label" htmlFor="standard">{config.form.standardLabel}</label>
-                <select id="standard" className="form-select" name="standard" value={form.standard} onChange={handleChange} required>
+                <select id="standard" className="form-select" name="standard" value={form.standard} onChange={handleChange} disabled={submitting || registrationClosed} required>
                   <option value="">{config.form.standardPlaceholder}</option>
                   {config.form.standardOptions.map((option) => (
                     <option key={option} value={option}>{option}</option>
@@ -833,27 +1111,31 @@ function StudentsPage({ onSubmitLead, config }: { onSubmitLead: (form: LeadForm)
             <div className="form-group">
               <label className="form-label" htmlFor="school">{config.form.schoolLabel}</label>
               <input id="school" className="form-input" name="school" value={form.school} onChange={handleChange}
-                placeholder={config.form.schoolPlaceholder} required />
+                placeholder={config.form.schoolPlaceholder} disabled={submitting || registrationClosed} required />
             </div>
 
             <div className="form-group">
               <label className="form-label" htmlFor="place">{config.form.placeLabel}</label>
               <input id="place" className="form-input" name="place" value={form.place} onChange={handleChange}
-                placeholder={config.form.placePlaceholder} required />
+                placeholder={config.form.placePlaceholder} disabled={submitting || registrationClosed} required />
             </div>
 
             <div className="consent-row">
-              <input id="consent" name="consent" type="checkbox" checked={form.consent} onChange={handleChange} required />
+              <input id="consent" name="consent" type="checkbox" checked={form.consent} onChange={handleChange} disabled={submitting || registrationClosed} required />
               <span>
                 {config.form.consentText}
               </span>
             </div>
 
-            <button className="submit-btn" type="submit" disabled={submitting}>
+            <button className="submit-btn" type="submit" disabled={submitting || registrationClosed || !isFormComplete}>
               {submitting ? config.form.submittingText : config.form.submitText}
             </button>
 
-            {statusMsg && (
+            {registrationClosed && (
+              <p className="form-status error" role="status">Registrations are closed for this campaign.</p>
+            )}
+
+            {statusMsg && !registrationClosed && (
               <p className={`form-status ${statusType}`} role="status">{statusMsg}</p>
             )}
           </form>
@@ -976,6 +1258,12 @@ function ControlPanelPage({
 
   const updateForm = (key: Exclude<keyof SiteConfig['form'], 'standardOptions'>, value: string) => {
     setConfig((cur) => ({ ...cur, form: { ...cur.form, [key]: value } }))
+    setStatus('Updated and saved.')
+  }
+
+  const updateCloseDate = (value: string) => {
+    const normalized = normalizeCloseDateValue(value)
+    setConfig((cur) => ({ ...cur, registrationCloseDate: normalized }))
     setStatus('Updated and saved.')
   }
 
@@ -1158,6 +1446,26 @@ function ControlPanelPage({
       </section>
 
       <section className="form-card animate-in animate-in-delay-4 cp-card">
+        <h2 className="form-title">Registration Settings</h2>
+        <div className="form-row">
+          <div className="form-group">
+            <label className="form-label">Closing Date</label>
+            <input
+              className="form-input"
+              type="date"
+              value={config.registrationCloseDate}
+              onChange={(e) => updateCloseDate(e.target.value)}
+            />
+          </div>
+          <div className="form-group">
+            <label className="form-label" aria-hidden="true">&nbsp;</label>
+            <button className="btn-clear" type="button" onClick={() => updateCloseDate('')}>Clear Date</button>
+          </div>
+        </div>
+        <p className="form-subtitle">Leave empty for no closing date.</p>
+      </section>
+
+      <section className="form-card animate-in animate-in-delay-4 cp-card">
         <h2 className="form-title">Giveaway + Images</h2>
         <div className="form-group">
           <label className="form-label">Giveaway Title</label>
@@ -1224,18 +1532,31 @@ function AdminPage({
   setLeads,
   onLogout,
   config,
+  setConfig,
 }: {
   leads: LeadRecord[]
   setLeads: React.Dispatch<React.SetStateAction<LeadRecord[]>>
   onLogout: () => void
   config: SiteConfig
+  setConfig: React.Dispatch<React.SetStateAction<SiteConfig>>
 }) {
   const [status, setStatus] = useState('')
 
-  const clearLeads = () => {
+  const clearLeads = async () => {
     if (!window.confirm('Are you sure you want to clear all student data?')) return
-    setLeads([])
-    setStatus('All local student data cleared.')
+    try {
+      if (MONGO_ENABLED) {
+        await clearLeadsRemote()
+        window.localStorage.removeItem(STORAGE_KEY)
+        setStatus('All student data cleared from MongoDB.')
+      } else {
+        saveLeads([])
+        setStatus('All local student data cleared.')
+      }
+      setLeads([])
+    } catch {
+      setStatus('Failed to clear student data. Please try again.')
+    }
   }
 
   const handleExport = () => {
@@ -1244,6 +1565,16 @@ function AdminPage({
       return
     }
     setStatus('Student data exported as Excel file.')
+  }
+
+  const updateCloseDate = (value: string) => {
+    const normalized = normalizeCloseDateValue(value)
+    setConfig((cur) => ({ ...cur, registrationCloseDate: normalized }))
+    if (normalized) {
+      setStatus(`Registrations will close on ${normalized}.`)
+    } else {
+      setStatus('Registrations are open. No closing date set.')
+    }
   }
 
   return (
@@ -1276,7 +1607,27 @@ function AdminPage({
         </div>
       </section>
 
-      <section className="table-card animate-in animate-in-delay-2">
+      <section className="form-card animate-in animate-in-delay-2 admin-card">
+        <h2 className="form-title">Registration Settings</h2>
+        <div className="form-row">
+          <div className="form-group">
+            <label className="form-label">Closing Date</label>
+            <input
+              className="form-input"
+              type="date"
+              value={config.registrationCloseDate}
+              onChange={(e) => updateCloseDate(e.target.value)}
+            />
+          </div>
+          <div className="form-group">
+            <label className="form-label" aria-hidden="true">&nbsp;</label>
+            <button className="btn-clear" type="button" onClick={() => updateCloseDate('')}>Clear Date</button>
+          </div>
+        </div>
+        <p className="form-subtitle">Leave empty for no closing date.</p>
+      </section>
+
+      <section className="table-card animate-in animate-in-delay-3">
         <div className="table-wrap">
           <table>
             <thead>
@@ -1304,7 +1655,7 @@ function AdminPage({
                     <td>{lead.standard}</td>
                     <td>{lead.place}</td>
                     <td>{lead.consent ? '✅ Yes' : '❌ No'}</td>
-                    <td>{lead.submittedAt}</td>
+                    <td>{formatSubmittedAt(lead.submittedAt)}</td>
                   </tr>
                 ))
               ) : (

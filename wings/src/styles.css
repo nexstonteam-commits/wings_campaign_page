@@ -1214,6 +1214,48 @@ ul {
   gap: 1rem;
 }
 
+.admin-page .btn-export,
+.admin-page .btn-clear,
+.admin-page .form-card,
+.admin-page .table-card,
+.admin-page tbody tr,
+.cp-page .btn-export,
+.cp-page .btn-clear,
+.cp-page .form-card,
+.cp-page tbody tr {
+  transition: none;
+}
+
+.admin-page * ,
+.cp-page * {
+  transition: none !important;
+}
+
+.admin-page *:hover,
+.admin-page *:hover::before,
+.admin-page *:hover::after,
+.cp-page *:hover,
+.cp-page *:hover::before,
+.cp-page *:hover::after {
+  transform: none !important;
+  animation: none !important;
+}
+
+.admin-page .animate-in,
+.admin-page .animate-in-delay-1,
+.admin-page .animate-in-delay-2,
+.admin-page .animate-in-delay-3,
+.admin-page .animate-in-delay-4,
+.cp-page .animate-in,
+.cp-page .animate-in-delay-1,
+.cp-page .animate-in-delay-2,
+.cp-page .animate-in-delay-3,
+.cp-page .animate-in-delay-4 {
+  animation: none !important;
+  transform: none !important;
+  opacity: 1 !important;
+}
+
 .stat-card {
   padding: 1.25rem 1.5rem;
   border-radius: var(--radius);
@@ -1357,6 +1399,51 @@ tbody tr {
 
 tbody tr:hover {
   background: rgba(79, 70, 229, 0.02);
+}
+
+.admin-page .btn-export:hover {
+  transform: none;
+  box-shadow: 0 4px 15px rgba(79, 70, 229, 0.25);
+}
+
+.cp-page .btn-export:hover {
+  transform: none;
+  box-shadow: 0 4px 15px rgba(79, 70, 229, 0.25);
+}
+
+.admin-page .btn-clear:hover {
+  transform: none;
+  background: rgba(239, 68, 68, 0.04);
+  border-color: rgba(239, 68, 68, 0.2);
+}
+
+.cp-page .btn-clear:hover {
+  transform: none;
+  background: rgba(239, 68, 68, 0.04);
+  border-color: rgba(239, 68, 68, 0.2);
+}
+
+.admin-page .table-card:hover {
+  transform: none;
+  border-color: rgba(79, 70, 229, 0.08);
+  box-shadow: var(--shadow-md);
+  animation: none;
+}
+
+.admin-page .form-card:hover,
+.cp-page .form-card:hover {
+  transform: none;
+  border-color: rgba(79, 70, 229, 0.1);
+  box-shadow: var(--shadow-lg);
+  animation: none;
+}
+
+.admin-page tbody tr:hover {
+  background: transparent;
+}
+
+.cp-page tbody tr:hover {
+  background: transparent;
 }
 
 .empty-state {
