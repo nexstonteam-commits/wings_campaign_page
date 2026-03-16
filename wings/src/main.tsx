@@ -285,6 +285,46 @@ async function insertLeadRemote(record: LeadRecord): Promise<void> {
   })
 }
 
+async function fetchLeadsServerless(): Promise<LeadRecord[]> {
+  const res = await fetch('/api/leads', { method: 'GET' })
+  const text = await res.text()
+  let payload: unknown = {}
+  if (text) {
+    try {
+      payload = JSON.parse(text)
+    } catch {
+      payload = { error: text }
+    }
+  }
+  if (!res.ok) {
+    const message = typeof (payload as { error?: string })?.error === 'string'
+      ? (payload as { error?: string }).error
+      : res.statusText
+    throw new Error(message || 'LEADS_FETCH_FAILED')
+  }
+  const docs = (payload as { documents?: LeadRecord[] })?.documents
+  return Array.isArray(docs) ? docs : []
+}
+
+async function clearLeadsServerless(): Promise<void> {
+  const res = await fetch('/api/leads', { method: 'DELETE' })
+  const text = await res.text()
+  let payload: unknown = {}
+  if (text) {
+    try {
+      payload = JSON.parse(text)
+    } catch {
+      payload = { error: text }
+    }
+  }
+  if (!res.ok) {
+    const message = typeof (payload as { error?: string })?.error === 'string'
+      ? (payload as { error?: string }).error
+      : res.statusText
+    throw new Error(message || 'LEADS_CLEAR_FAILED')
+  }
+}
+
 function buildLeadApiPayload(record: LeadRecord): LeadApiPayload {
   return {
     id: record.id,
@@ -604,7 +644,7 @@ function exportLeadsAsExcel(records: LeadRecord[]) {
 }
 
 function App() {
-  const [leads, setLeads] = useState<LeadRecord[]>(() => (MONGO_ENABLED ? [] : loadLeads()))
+  const [leads, setLeads] = useState<LeadRecord[]>([])
   const [booting, setBooting] = useState(true)
   const [isAdminAuthed, setIsAdminAuthed] = useState<boolean>(() => loadAdminAuth())
   const [isCpAuthed, setIsCpAuthed] = useState<boolean>(() => loadCpAuth())
@@ -612,14 +652,7 @@ function App() {
   const [remoteConfigReady, setRemoteConfigReady] = useState(!MONGO_CONFIG_ENABLED)
 
   useEffect(() => {
-    if (!MONGO_ENABLED) {
-      saveLeads(leads)
-    }
-  }, [leads])
-  useEffect(() => {
-    if (MONGO_ENABLED) {
-      window.localStorage.removeItem(STORAGE_KEY)
-    }
+    window.localStorage.removeItem(STORAGE_KEY)
   }, [])
   useEffect(() => { saveAdminAuth(isAdminAuthed) }, [isAdminAuthed])
   useEffect(() => { saveCpAuth(isCpAuthed) }, [isCpAuthed])
@@ -654,14 +687,29 @@ function App() {
     return () => window.clearTimeout(handle)
   }, [siteConfig, remoteConfigReady])
   useEffect(() => {
-    if (!MONGO_ENABLED || !isAdminAuthed) return
+    if (!isAdminAuthed) return
     let active = true
-    fetchLeadsRemote()
-      .then((records) => {
+    const load = async () => {
+      try {
+        const records = await fetchLeadsServerless()
         if (!active) return
         setLeads(records)
-      })
-      .catch(() => {})
+        return
+      } catch {
+        if (!MONGO_ENABLED) {
+          if (active) setLeads([])
+          return
+        }
+      }
+      try {
+        const records = await fetchLeadsRemote()
+        if (!active) return
+        setLeads(records)
+      } catch {
+        if (active) setLeads([])
+      }
+    }
+    load()
     return () => {
       active = false
     }
@@ -1545,13 +1593,17 @@ function AdminPage({
   const clearLeads = async () => {
     if (!window.confirm('Are you sure you want to clear all student data?')) return
     try {
-      if (MONGO_ENABLED) {
-        await clearLeadsRemote()
-        window.localStorage.removeItem(STORAGE_KEY)
+      try {
+        await clearLeadsServerless()
         setStatus('All student data cleared from MongoDB.')
-      } else {
-        saveLeads([])
-        setStatus('All local student data cleared.')
+      } catch {
+        if (MONGO_ENABLED) {
+          await clearLeadsRemote()
+          setStatus('All student data cleared from MongoDB.')
+        } else {
+          saveLeads([])
+          setStatus('All local student data cleared.')
+        }
       }
       setLeads([])
     } catch {

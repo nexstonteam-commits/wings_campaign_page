@@ -13,8 +13,41 @@ function getClientPromise() {
 }
 
 export default async function handler(req, res) {
+  if (req.method === 'GET') {
+    try {
+      const client = await getClientPromise()
+      const db = client.db('wings')
+      const collection = db.collection('leads')
+      const docs = await collection.find({}).sort({ submittedAt: -1 }).toArray()
+      const sanitized = docs.map(({ _id, ...rest }) => rest)
+      return res.status(200).json({ documents: sanitized })
+    } catch (error) {
+      console.error('Failed to fetch leads', error)
+      const message = process.env.NODE_ENV !== 'production' && error instanceof Error
+        ? error.message
+        : 'INTERNAL_ERROR'
+      return res.status(500).json({ error: message })
+    }
+  }
+
+  if (req.method === 'DELETE') {
+    try {
+      const client = await getClientPromise()
+      const db = client.db('wings')
+      const collection = db.collection('leads')
+      await collection.deleteMany({})
+      return res.status(200).json({ success: true })
+    } catch (error) {
+      console.error('Failed to clear leads', error)
+      const message = process.env.NODE_ENV !== 'production' && error instanceof Error
+        ? error.message
+        : 'INTERNAL_ERROR'
+      return res.status(500).json({ error: message })
+    }
+  }
+
   if (req.method !== 'POST') {
-    res.setHeader('Allow', ['POST'])
+    res.setHeader('Allow', ['GET', 'POST', 'DELETE'])
     return res.status(405).json({ error: 'METHOD_NOT_ALLOWED' })
   }
 
